@@ -11,6 +11,16 @@ on:
       - lci_benchmark/build_matched_sample.py
       - lci_benchmark/convert_ilcd_tidas.sh
       - .github/workflows/lci-research-execute.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - lci_benchmark/research_scripts.part00
+      - lci_benchmark/research_scripts.part01
+      - lci_benchmark/research_scripts.part02
+      - lci_benchmark/research_scripts.part03
+      - lci_benchmark/build_matched_sample.py
+      - lci_benchmark/convert_ilcd_tidas.sh
+      - .github/workflows/lci-research-execute.yml
 
 permissions:
   contents: read
