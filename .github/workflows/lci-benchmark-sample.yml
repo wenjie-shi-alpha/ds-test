@@ -1,0 +1,66 @@
+name: LCI benchmark matched sample
+
+on:
+  push:
+    branches:
+      - lci-format-benchmark-20260824
+    paths:
+      - 'lci_benchmark/build_matched_sample.py'
+      - 'lci_benchmark/convert_ilcd_tidas.sh'
+      - '.github/workflows/lci-benchmark-sample.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lci_benchmark/build_matched_sample.py'
+      - 'lci_benchmark/convert_ilcd_tidas.sh'
+      - '.github/workflows/lci-benchmark-sample.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-sample:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the matched USLCI release in JSON-LD and EcoSpold2
+        run: |
+          set -euo pipefail
+          mkdir -p work/downloads work/sample_evidence
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_json_ld.zip \
+            'https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_json_ld.zip.zip'
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_ecospold2.zip \
+            'https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_ecospold2.zip.zip'
+
+      - name: Convert the same ILCD release to TIDAS with the pinned converter
+        run: |
+          chmod +x lci_benchmark/convert_ilcd_tidas.sh
+          TIDAS_VERSION=0.2.0 lci_benchmark/convert_ilcd_tidas.sh work
+          cp -a work/tidas_convert_diagnostic work/sample_evidence/conversion
+
+      - name: Build exact-UUID matched, size-stratified four-format sample
+        run: |
+          python lci_benchmark/build_matched_sample.py \
+            --jsonld work/downloads/uslci_fy19_q2_json_ld.zip \
+            --ecospold2 work/downloads/uslci_fy19_q2_ecospold2.zip \
+            --ilcd work/downloads/uslci_fy19_q2_ilcd.zip \
+            --tidas-dir work/tidas_from_ilcd/data \
+            --output work/matched_sample \
+            --n 30
+          cp -a work/sample_evidence work/matched_sample/evidence/runtime
+          find work/matched_sample -type f -print0 | sort -z | xargs -0 sha256sum > work/matched_sample/all_files_sha256.txt
+          du -sh work/matched_sample
+
+      - name: Upload matched sample
+        uses: actions/upload-artifact@v4
+        with:
+          name: matched-four-format-sample
+          path: work/matched_sample
+          if-no-files-found: error
+          retention-days: 30
