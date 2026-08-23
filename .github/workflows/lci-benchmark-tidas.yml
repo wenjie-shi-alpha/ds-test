@@ -1,0 +1,48 @@
+name: LCI benchmark TIDAS import
+
+on:
+  push:
+    branches:
+      - lci-format-benchmark-20260824
+    paths:
+      - 'lci_benchmark/import_tidas.sh'
+      - '.github/workflows/lci-benchmark-tidas.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lci_benchmark/import_tidas.sh'
+      - '.github/workflows/lci-benchmark-tidas.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  import-tidas:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Import the matched USLCI JSON-LD release into TIDAS
+        id: import
+        continue-on-error: true
+        shell: bash
+        run: |
+          chmod +x lci_benchmark/import_tidas.sh
+          TIDAS_VERSION=0.2.0 lci_benchmark/import_tidas.sh work
+
+      - name: Upload TIDAS diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tidas-import-diagnostic
+          path: work/tidas_diagnostic
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail if import failed
+        if: steps.import.outcome != 'success'
+        run: exit 1
