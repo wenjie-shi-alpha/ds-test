@@ -1,0 +1,314 @@
+name: Full LCI representation experiment
+
+on:
+  push:
+    branches:
+      - lci-format-benchmark-20260824
+    paths:
+      - 'lci_benchmark/research_scripts.tar.gz.b64'
+      - 'lci_benchmark/build_matched_sample.py'
+      - 'lci_benchmark/convert_ilcd_tidas.sh'
+      - '.github/workflows/lci-research-full.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lci_benchmark/research_scripts.tar.gz.b64'
+      - 'lci_benchmark/build_matched_sample.py'
+      - 'lci_benchmark/convert_ilcd_tidas.sh'
+      - '.github/workflows/lci-research-full.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out experiment source
+        uses: actions/checkout@v4
+
+      - name: Decode the pinned research script bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '1215cbb1a10b59bb3d7d4e79960fb4613600ef1f314c0649c64a96ba4dfe6c33  lci_benchmark/research_scripts.tar.gz.b64' | sha256sum -c -
+          mkdir -p work/scripts
+          base64 -d lci_benchmark/research_scripts.tar.gz.b64 > work/research_scripts.tar.gz
+          echo '2521eb6eb6792e28c6b175f58198647a6a45665aef5c8d317b0370e9aaea6ccc  work/research_scripts.tar.gz' | sha256sum -c -
+          tar -xzf work/research_scripts.tar.gz -C work/scripts
+          python -m py_compile work/scripts/*.py
+          chmod +x work/scripts/*.sh
+
+      - name: Install and record the preparation environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check 'lxml==6.0.1'
+          mkdir -p work/evidence
+          python --version > work/evidence/python_version.txt
+          python -m pip freeze > work/evidence/python_packages.txt
+          git rev-parse HEAD > work/evidence/experiment_commit.txt
+
+      - name: Download the same public USLCI release in JSON-LD and EcoSpold2
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/downloads
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_json_ld.zip \
+            'https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_json_ld.zip.zip'
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_ecospold2.zip \
+            'https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_ecospold2.zip.zip'
+          sha256sum work/downloads/* > work/evidence/source_archive_sha256.txt
+
+      - name: Convert the corresponding ILCD release into TIDAS with a pinned converter
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x lci_benchmark/convert_ilcd_tidas.sh
+          TIDAS_VERSION=0.2.0 lci_benchmark/convert_ilcd_tidas.sh work
+          cp -a work/tidas_convert_diagnostic work/evidence/tidas_conversion
+
+      - name: Build the exact-UUID matched four-format sample
+        shell: bash
+        run: |
+          set -euo pipefail
+          python lci_benchmark/build_matched_sample.py \
+            --jsonld work/downloads/uslci_fy19_q2_json_ld.zip \
+            --ecospold2 work/downloads/uslci_fy19_q2_ecospold2.zip \
+            --ilcd work/downloads/uslci_fy19_q2_ilcd.zip \
+            --tidas-dir work/tidas_from_ilcd/data \
+            --output work/matched_sample \
+            --n 30
+
+      - name: Prepare the four-format benchmark and the 2 by 3 ablation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/prepared
+          python work/scripts/prepare_benchmark.py \
+            --sample work/matched_sample \
+            --output work/prepared/format_benchmark
+          python work/scripts/prepare_ablation.py \
+            --benchmark work/prepared/format_benchmark \
+            --output work/prepared/ablation_benchmark
+          cp -a work/evidence work/prepared/evidence
+          cp work/matched_sample/manifest.csv work/prepared/evidence/matched_sample_manifest.csv
+          cp work/matched_sample/manifest.json work/prepared/evidence/matched_sample_manifest.json
+          cp work/matched_sample/all_files_sha256.txt work/prepared/evidence/matched_sample_sha256.txt
+          find work/prepared -type f -print0 | sort -z | xargs -0 sha256sum > work/prepared/evidence/prepared_files_sha256.txt
+          du -sh work/prepared
+
+      - name: Upload prepared research benchmarks
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-research-benchmarks
+          path: work/prepared
+          if-no-files-found: error
+          retention-days: 30
+
+  infer:
+    if: github.actor != 'github-actions[bot]'
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model_repo: Qwen/Qwen3-4B-GGUF
+            model_alias: qwen3-4b
+            model_id: Qwen/Qwen3-4B-GGUF
+            seed: 11
+            shard_index: 0
+          - model_repo: Qwen/Qwen3-4B-GGUF
+            model_alias: qwen3-4b
+            model_id: Qwen/Qwen3-4B-GGUF
+            seed: 11
+            shard_index: 1
+          - model_repo: Qwen/Qwen3-4B-GGUF
+            model_alias: qwen3-4b
+            model_id: Qwen/Qwen3-4B-GGUF
+            seed: 22
+            shard_index: 0
+          - model_repo: Qwen/Qwen3-4B-GGUF
+            model_alias: qwen3-4b
+            model_id: Qwen/Qwen3-4B-GGUF
+            seed: 22
+            shard_index: 1
+          - model_repo: Qwen/Qwen3-4B-GGUF
+            model_alias: qwen3-4b
+            model_id: Qwen/Qwen3-4B-GGUF
+            seed: 33
+            shard_index: 0
+          - model_repo: Qwen/Qwen3-4B-GGUF
+            model_alias: qwen3-4b
+            model_id: Qwen/Qwen3-4B-GGUF
+            seed: 33
+            shard_index: 1
+          - model_repo: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+            model_alias: qwen25-15b
+            model_id: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+            seed: 11
+            shard_index: 0
+          - model_repo: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+            model_alias: qwen25-15b
+            model_id: Qwen/Qwen2.5-1.5B-Instruct-GGUF
+            seed: 11
+            shard_index: 1
+    steps:
+      - name: Check out experiment source
+        uses: actions/checkout@v4
+
+      - name: Download the prepared benchmark
+        uses: actions/download-artifact@v4
+        with:
+          name: prepared-research-benchmarks
+          path: work/prepared
+
+      - name: Decode the pinned research script bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '1215cbb1a10b59bb3d7d4e79960fb4613600ef1f314c0649c64a96ba4dfe6c33  lci_benchmark/research_scripts.tar.gz.b64' | sha256sum -c -
+          mkdir -p work/scripts
+          base64 -d lci_benchmark/research_scripts.tar.gz.b64 > work/research_scripts.tar.gz
+          echo '2521eb6eb6792e28c6b175f58198647a6a45665aef5c8d317b0370e9aaea6ccc  work/research_scripts.tar.gz' | sha256sum -c -
+          tar -xzf work/research_scripts.tar.gz -C work/scripts
+          chmod +x work/scripts/*.sh
+
+      - name: Download pinned llama.cpp and official GGUF model
+        shell: bash
+        run: |
+          set -euo pipefail
+          LLAMA_TAG=b10516 work/scripts/setup_runtime.sh '${{ matrix.model_repo }}' Q4_K_M work/runtime
+
+      - name: Start the local OpenAI-compatible inference server
+        shell: bash
+        run: |
+          set -euo pipefail
+          LLAMA_SERVER=$(cat work/runtime/metadata/llama_server_path.txt)
+          MODEL_PATH=$(cat work/runtime/metadata/model_path.txt)
+          nohup "$LLAMA_SERVER" \
+            --model "$MODEL_PATH" \
+            --alias '${{ matrix.model_alias }}' \
+            --host 127.0.0.1 \
+            --port 8080 \
+            --ctx-size 32768 \
+            --threads 4 \
+            --parallel 1 \
+            --jinja \
+            > work/runtime/server.log 2>&1 &
+          echo $! > work/runtime/server.pid
+          for i in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8080/health > work/runtime/health.json; then
+              cat work/runtime/health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          cat work/runtime/server.log
+          exit 1
+
+      - name: Run the controlled extraction prompts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/outputs
+          MODEL_REVISION=$(cat work/runtime/metadata/model_revision.txt)
+          MODEL_FILE=$(cat work/runtime/metadata/model_file.txt)
+          MODEL_SHA=$(cut -d' ' -f1 work/runtime/metadata/model_sha256.txt)
+          LLAMA_SHA=$(cut -d' ' -f1 work/runtime/metadata/llama_asset_sha256.txt)
+          LLAMA_VERSION=$(tr '\n' ' ' < work/runtime/metadata/llama_version.txt | head -c 1000)
+          python work/scripts/run_inference.py \
+            --prepared-root work/prepared \
+            --output 'work/outputs/${{ matrix.model_alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard_index }}of2.jsonl' \
+            --model-alias '${{ matrix.model_alias }}' \
+            --model-id '${{ matrix.model_id }}' \
+            --model-revision "$MODEL_REVISION" \
+            --model-file "$MODEL_FILE" \
+            --model-sha256 "$MODEL_SHA" \
+            --llama-version "$LLAMA_VERSION" \
+            --llama-asset-sha256 "$LLAMA_SHA" \
+            --seed '${{ matrix.seed }}' \
+            --temperature 0.2 \
+            --top-p 0.8 \
+            --top-k 20 \
+            --min-p 0.0 \
+            --presence-penalty 1.5 \
+            --max-tokens 512 \
+            --reasoning-mode non-thinking \
+            --shard-index '${{ matrix.shard_index }}' \
+            --shard-count 2 \
+            --timeout 600 \
+            --retries 3
+          cp -a work/runtime/metadata work/outputs/'${{ matrix.model_alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard_index }}of2.runtime_metadata'
+          cp work/runtime/server.log work/outputs/'${{ matrix.model_alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard_index }}of2.server.log'
+          sha256sum work/outputs/*jsonl work/outputs/*metadata.json > work/outputs/output_sha256.txt
+
+      - name: Stop inference server
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f work/runtime/server.pid ]]; then kill "$(cat work/runtime/server.pid)" || true; fi
+
+      - name: Upload inference output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-${{ matrix.model_alias }}-seed${{ matrix.seed }}-shard${{ matrix.shard_index }}of2
+          path: work/outputs
+          if-no-files-found: error
+          retention-days: 30
+
+  score:
+    if: always() && needs.prepare.result == 'success'
+    needs:
+      - prepare
+      - infer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out experiment source
+        uses: actions/checkout@v4
+
+      - name: Download prepared benchmark
+        uses: actions/download-artifact@v4
+        with:
+          name: prepared-research-benchmarks
+          path: work/prepared
+
+      - name: Download all completed inference outputs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: inference-*
+          path: work/inference
+          merge-multiple: true
+
+      - name: Decode scripts and score all outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/scripts work/scored
+          base64 -d lci_benchmark/research_scripts.tar.gz.b64 | tar -xz -C work/scripts
+          mapfile -t OUTPUTS < <(find work/inference -type f -name '*.jsonl' | sort)
+          if [[ ${#OUTPUTS[@]} -eq 0 ]]; then echo 'No inference JSONL files found' >&2; exit 1; fi
+          python work/scripts/score_outputs.py \
+            --prepared-root work/prepared \
+            --outputs "${OUTPUTS[@]}" \
+            --outdir work/scored
+          cp work/prepared/format_benchmark/benchmark_metadata.json work/scored/
+          cp work/prepared/ablation_benchmark/ablation_metadata.json work/scored/
+          find work/scored -type f -print0 | sort -z | xargs -0 sha256sum > work/scored/scored_files_sha256.txt
+
+      - name: Upload scored results
+        uses: actions/upload-artifact@v4
+        with:
+          name: scored-research-results
+          path: work/scored
+          if-no-files-found: error
+          retention-days: 30
