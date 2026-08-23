@@ -6,12 +6,14 @@ on:
       - lci-format-benchmark-20260824
     paths:
       - 'lci_benchmark/import_tidas.sh'
+      - 'lci_benchmark/patch_openlca_for_tidas.py'
       - '.github/workflows/lci-benchmark-tidas.yml'
   pull_request:
     branches:
       - main
     paths:
       - 'lci_benchmark/import_tidas.sh'
+      - 'lci_benchmark/patch_openlca_for_tidas.py'
       - '.github/workflows/lci-benchmark-tidas.yml'
 
 permissions:
@@ -21,24 +23,24 @@ jobs:
   import-tidas:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Import the matched USLCI JSON-LD release into TIDAS v0.1.3
+      - name: Import matched USLCI JSON-LD into TIDAS v0.2.0
         id: import
         continue-on-error: true
         shell: bash
         run: |
           chmod +x lci_benchmark/import_tidas.sh
-          TIDAS_VERSION=0.1.3 lci_benchmark/import_tidas.sh work
+          TIDAS_VERSION=0.2.0 lci_benchmark/import_tidas.sh work
 
       - name: Upload TIDAS diagnostic evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tidas-v0.1.3-import-diagnostic
+          name: tidas-v0.2.0-patched-import-diagnostic
           path: work/tidas_diagnostic
           if-no-files-found: error
           retention-days: 30
