@@ -7,6 +7,10 @@ on:
       - lci_benchmark/v2_bundle.part00
       - lci_benchmark/v2_bundle.part01
       - .github/workflows/lci-v2-bundle-diagnostic.yml
+  pull_request:
+    branches: [lci-format-benchmark-20260824]
+    paths:
+      - .github/workflows/lci-v2-bundle-diagnostic.yml
 
 permissions:
   contents: read
