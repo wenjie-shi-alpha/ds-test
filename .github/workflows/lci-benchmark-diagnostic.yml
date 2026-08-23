@@ -7,6 +7,12 @@ on:
     paths:
       - 'lci_benchmark/**'
       - '.github/workflows/lci-benchmark-diagnostic.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lci_benchmark/**'
+      - '.github/workflows/lci-benchmark-diagnostic.yml'
 
 permissions:
   contents: read
