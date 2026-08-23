@@ -1,0 +1,193 @@
+name: Execute complete LCI representation study
+
+on:
+  push:
+    branches: [lci-format-benchmark-20260824]
+    paths:
+      - lci_benchmark/research_scripts.part00
+      - lci_benchmark/research_scripts.part01
+      - lci_benchmark/research_scripts.part02
+      - lci_benchmark/research_scripts.part03
+      - lci_benchmark/build_matched_sample.py
+      - lci_benchmark/convert_ilcd_tidas.sh
+      - .github/workflows/lci-research-execute.yml
+
+permissions:
+  contents: read
+
+env:
+  BUNDLE_SHA256: 2521eb6eb6792e28c6b175f58198647a6a45665aef5c8d317b0370e9aaea6ccc
+  LLAMA_TAG: b10516
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reassemble and verify research scripts
+        run: |
+          set -euo pipefail
+          mkdir -p work/scripts
+          cat lci_benchmark/research_scripts.part0* | tr -d '\r\n\t ' | base64 -d > work/research_scripts.tar.gz
+          echo "$BUNDLE_SHA256  work/research_scripts.tar.gz" | sha256sum -c -
+          tar -xzf work/research_scripts.tar.gz -C work/scripts
+          chmod +x work/scripts/*.sh
+          python -m py_compile work/scripts/*.py
+      - name: Record preparation environment
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check lxml==6.0.1
+          mkdir -p work/evidence work/downloads
+          python --version > work/evidence/python_version.txt
+          python -m pip freeze > work/evidence/python_packages.txt
+          git rev-parse HEAD > work/evidence/experiment_commit.txt
+          printf 'workflow_run_id=%s\nworkflow_run_number=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_NUMBER" > work/evidence/workflow_run.txt
+      - name: Download matched USLCI source archives
+        run: |
+          set -euo pipefail
+          curl --retry 5 --retry-all-errors -L --fail --show-error -o work/downloads/uslci_fy19_q2_json_ld.zip \
+            https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_json_ld.zip.zip
+          curl --retry 5 --retry-all-errors -L --fail --show-error -o work/downloads/uslci_fy19_q2_ecospold2.zip \
+            https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_ecospold2.zip.zip
+          sha256sum work/downloads/* > work/evidence/source_archive_sha256.txt
+      - name: Convert corresponding ILCD release to TIDAS
+        run: |
+          set -euo pipefail
+          chmod +x lci_benchmark/convert_ilcd_tidas.sh
+          TIDAS_VERSION=0.2.0 lci_benchmark/convert_ilcd_tidas.sh work
+          cp -a work/tidas_convert_diagnostic work/evidence/tidas_conversion
+      - name: Build exact-UUID sample and both experiments
+        run: |
+          set -euo pipefail
+          python lci_benchmark/build_matched_sample.py \
+            --jsonld work/downloads/uslci_fy19_q2_json_ld.zip \
+            --ecospold2 work/downloads/uslci_fy19_q2_ecospold2.zip \
+            --ilcd work/downloads/uslci_fy19_q2_ilcd.zip \
+            --tidas-dir work/tidas_from_ilcd/data \
+            --output work/matched_sample --n 30
+          mkdir -p work/prepared
+          python work/scripts/prepare_benchmark.py --sample work/matched_sample --output work/prepared/format_benchmark
+          python work/scripts/prepare_ablation.py --benchmark work/prepared/format_benchmark --output work/prepared/ablation_benchmark
+          cp -a work/evidence work/prepared/evidence
+          cp work/matched_sample/manifest.csv work/prepared/evidence/matched_sample_manifest.csv
+          cp work/matched_sample/manifest.json work/prepared/evidence/matched_sample_manifest.json
+          cp work/matched_sample/all_files_sha256.txt work/prepared/evidence/matched_sample_sha256.txt
+          find work/prepared -type f -print0 | sort -z | xargs -0 sha256sum > work/prepared/evidence/prepared_files_sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prepared-study-inputs
+          path: work/prepared
+          if-no-files-found: error
+          retention-days: 30
+
+  infer:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 11, shard: 0}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 11, shard: 1}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 22, shard: 0}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 22, shard: 1}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 33, shard: 0}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 33, shard: 1}
+          - {repo: Qwen/Qwen2.5-1.5B-Instruct-GGUF, alias: qwen25-15b, seed: 11, shard: 0}
+          - {repo: Qwen/Qwen2.5-1.5B-Instruct-GGUF, alias: qwen25-15b, seed: 11, shard: 1}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prepared-study-inputs
+          path: work/prepared
+      - name: Reassemble scripts and install pinned runtime
+        run: |
+          set -euo pipefail
+          mkdir -p work/scripts
+          cat lci_benchmark/research_scripts.part0* | tr -d '\r\n\t ' | base64 -d > work/research_scripts.tar.gz
+          echo "$BUNDLE_SHA256  work/research_scripts.tar.gz" | sha256sum -c -
+          tar -xzf work/research_scripts.tar.gz -C work/scripts
+          chmod +x work/scripts/*.sh
+          LLAMA_TAG="$LLAMA_TAG" work/scripts/setup_runtime.sh '${{ matrix.repo }}' Q4_K_M work/runtime
+      - name: Start local llama.cpp server
+        run: |
+          set -euo pipefail
+          SERVER=$(cat work/runtime/metadata/llama_server_path.txt)
+          MODEL=$(cat work/runtime/metadata/model_path.txt)
+          nohup "$SERVER" --model "$MODEL" --alias '${{ matrix.alias }}' --host 127.0.0.1 --port 8080 \
+            --ctx-size 32768 --threads 4 --parallel 1 --jinja > work/runtime/server.log 2>&1 &
+          echo $! > work/runtime/server.pid
+          for i in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8080/health > work/runtime/health.json; then exit 0; fi
+            sleep 2
+          done
+          cat work/runtime/server.log
+          exit 1
+      - name: Run controlled extraction prompts
+        run: |
+          set -euo pipefail
+          mkdir -p work/outputs
+          REV=$(cat work/runtime/metadata/model_revision.txt)
+          FILE=$(cat work/runtime/metadata/model_file.txt)
+          MSHA=$(cut -d' ' -f1 work/runtime/metadata/model_sha256.txt)
+          LSHA=$(cut -d' ' -f1 work/runtime/metadata/llama_asset_sha256.txt)
+          LVER=$(tr '\n' ' ' < work/runtime/metadata/llama_version.txt | head -c 1000)
+          OUT='work/outputs/${{ matrix.alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard }}of2.jsonl'
+          python work/scripts/run_inference.py --prepared-root work/prepared --output "$OUT" \
+            --model-alias '${{ matrix.alias }}' --model-id '${{ matrix.repo }}' \
+            --model-revision "$REV" --model-file "$FILE" --model-sha256 "$MSHA" \
+            --llama-version "$LVER" --llama-asset-sha256 "$LSHA" --seed '${{ matrix.seed }}' \
+            --temperature 0.2 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 1.5 \
+            --max-tokens 512 --reasoning-mode non-thinking --shard-index '${{ matrix.shard }}' \
+            --shard-count 2 --timeout 600 --retries 3
+          cp -a work/runtime/metadata 'work/outputs/${{ matrix.alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard }}of2.runtime_metadata'
+          cp work/runtime/server.log 'work/outputs/${{ matrix.alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard }}of2.server.log'
+          sha256sum work/outputs/*.jsonl work/outputs/*.metadata.json > work/outputs/output_sha256.txt
+      - name: Stop server
+        if: always()
+        run: if [[ -f work/runtime/server.pid ]]; then kill "$(cat work/runtime/server.pid)" || true; fi
+      - name: Upload inference evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: output-${{ matrix.alias }}-seed${{ matrix.seed }}-shard${{ matrix.shard }}of2
+          path: work/outputs
+          if-no-files-found: error
+          retention-days: 30
+
+  score:
+    if: always() && needs.prepare.result == 'success'
+    needs: [prepare, infer]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prepared-study-inputs
+          path: work/prepared
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: output-*
+          path: work/inference
+          merge-multiple: true
+      - name: Score all completed outputs
+        run: |
+          set -euo pipefail
+          mkdir -p work/scripts work/scored
+          cat lci_benchmark/research_scripts.part0* | tr -d '\r\n\t ' | base64 -d | tar -xz -C work/scripts
+          mapfile -t OUTPUTS < <(find work/inference -type f -name '*.jsonl' | sort)
+          [[ ${#OUTPUTS[@]} -gt 0 ]]
+          python work/scripts/score_outputs.py --prepared-root work/prepared --outputs "${OUTPUTS[@]}" --outdir work/scored
+          cp work/prepared/format_benchmark/benchmark_metadata.json work/scored/
+          cp work/prepared/ablation_benchmark/ablation_metadata.json work/scored/
+          find work/scored -type f -print0 | sort -z | xargs -0 sha256sum > work/scored/scored_files_sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scored-study-results
+          path: work/scored
+          if-no-files-found: error
+          retention-days: 30
