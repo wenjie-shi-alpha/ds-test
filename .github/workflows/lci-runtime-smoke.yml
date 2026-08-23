@@ -1,0 +1,70 @@
+name: LCI inference runtime smoke test
+on:
+  push:
+    branches: [lci-format-benchmark-20260824]
+    paths:
+      - lci_benchmark/research_scripts.part00
+      - lci_benchmark/research_scripts.part01
+      - lci_benchmark/research_scripts.part02
+      - lci_benchmark/research_scripts.part03
+      - .github/workflows/lci-runtime-smoke.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - lci_benchmark/research_scripts.part00
+      - lci_benchmark/research_scripts.part01
+      - lci_benchmark/research_scripts.part02
+      - lci_benchmark/research_scripts.part03
+      - .github/workflows/lci-runtime-smoke.yml
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reassemble verified script bundle
+        run: |
+          set -euo pipefail
+          mkdir -p work/scripts
+          cat lci_benchmark/research_scripts.part0* | tr -d '\r\n\t ' | base64 -d > work/scripts.tar.gz
+          echo '2521eb6eb6792e28c6b175f58198647a6a45665aef5c8d317b0370e9aaea6ccc  work/scripts.tar.gz' | sha256sum -c -
+          tar -xzf work/scripts.tar.gz -C work/scripts
+          chmod +x work/scripts/*.sh
+          python -m py_compile work/scripts/*.py
+      - name: Install pinned llama.cpp and official Qwen model
+        run: LLAMA_TAG=b10516 work/scripts/setup_runtime.sh Qwen/Qwen2.5-1.5B-Instruct-GGUF Q4_K_M work/runtime
+      - name: Start server and run one structured-output request
+        run: |
+          set -euo pipefail
+          SERVER=$(cat work/runtime/metadata/llama_server_path.txt)
+          MODEL=$(cat work/runtime/metadata/model_path.txt)
+          nohup "$SERVER" --model "$MODEL" --alias qwen25-15b --host 127.0.0.1 --port 8080 \
+            --ctx-size 8192 --threads 4 --parallel 1 --jinja > work/runtime/server.log 2>&1 &
+          echo $! > work/runtime/server.pid
+          for i in $(seq 1 180); do
+            curl -fsS http://127.0.0.1:8080/health && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"qwen25-15b","messages":[{"role":"system","content":"Return only valid JSON."},{"role":"user","content":"Return {\"status\":\"ok\"}."}],"temperature":0.2,"top_p":0.8,"top_k":20,"min_p":0.0,"seed":11,"max_tokens":64,"stream":false}' \
+            | tee work/runtime/smoke_response.json
+          python - <<'PY'
+          import json
+          j=json.load(open('work/runtime/smoke_response.json'))
+          assert j.get('choices'), j
+          assert (j['choices'][0].get('message') or {}).get('content'), j
+          print(j['choices'][0]['message']['content'])
+          PY
+      - name: Stop server
+        if: always()
+        run: if [[ -f work/runtime/server.pid ]]; then kill "$(cat work/runtime/server.pid)" || true; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lci-runtime-smoke-evidence
+          path: work/runtime
+          if-no-files-found: error
+          retention-days: 30
