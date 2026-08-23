@@ -1,11 +1,9 @@
 name: LCI v2 bundle integrity gate
 
 on:
-  push:
+  pull_request:
     branches: [lci-format-benchmark-20260824]
     paths:
-      - lci_benchmark/v2_bundle.part00
-      - lci_benchmark/v2_bundle.part01
       - .github/workflows/lci-v2-bundle-diagnostic.yml
 
 permissions:
