@@ -1,0 +1,55 @@
+name: LCI benchmark diagnostic
+
+on:
+  push:
+    branches:
+      - lci-format-benchmark-20260824
+    paths:
+      - 'lci_benchmark/**'
+      - '.github/workflows/lci-benchmark-diagnostic.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download one matched USLCI release in three public formats
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/downloads work/diagnostic
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_json_ld.zip \
+            'https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_json_ld.zip.zip'
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_ecospold2.zip \
+            'https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_ecospold2.zip.zip'
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_ilcd.zip \
+            'https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslcy_fy19_q2_01_olca1_8_0_ilcd.zip.zip'
+          ls -lh work/downloads
+
+      - name: Inspect archive layouts and sample records
+        run: |
+          python lci_benchmark/diagnose_archives.py \
+            work/diagnostic/archive_report.json \
+            work/downloads/uslci_fy19_q2_json_ld.zip \
+            work/downloads/uslci_fy19_q2_ecospold2.zip \
+            work/downloads/uslci_fy19_q2_ilcd.zip
+          sha256sum work/downloads/* > work/diagnostic/download_sha256.txt
+          du -ah work/diagnostic
+
+      - name: Upload diagnostic report
+        uses: actions/upload-artifact@v4
+        with:
+          name: uslci-archive-diagnostic
+          path: work/diagnostic
+          if-no-files-found: error
+          retention-days: 30
