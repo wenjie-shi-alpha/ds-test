@@ -1,0 +1,36 @@
+name: Research bundle diagnostic
+on:
+  push:
+    branches: [lci-format-benchmark-20260824]
+    paths:
+      - lci_benchmark/research_scripts.tar.gz.b64
+      - .github/workflows/bundle-diagnostic.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - lci_benchmark/research_scripts.tar.gz.b64
+      - .github/workflows/bundle-diagnostic.yml
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect and decode
+        shell: bash
+        run: |
+          set -u
+          f=lci_benchmark/research_scripts.tar.gz.b64
+          wc -c "$f"
+          sha256sum "$f"
+          echo 'invalid character count:'
+          LC_ALL=C grep -o '[^A-Za-z0-9+/=[:space:]]' "$f" | wc -l || true
+          echo 'invalid characters (hex):'
+          LC_ALL=C grep -o '[^A-Za-z0-9+/=[:space:]]' "$f" | head -20 | od -An -tx1 || true
+          echo 'head:'; head -c 80 "$f"; echo
+          echo 'tail:'; tail -c 80 "$f"; echo
+          tr -d '\r\n\t ' < "$f" | base64 -d -i > decoded.tar.gz
+          sha256sum decoded.tar.gz
+          wc -c decoded.tar.gz
+          tar -tzf decoded.tar.gz | head -20
