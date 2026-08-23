@@ -1,0 +1,43 @@
+name: LCI benchmark ILCD to TIDAS
+
+on:
+  push:
+    branches:
+      - lci-format-benchmark-20260824
+    paths:
+      - 'lci_benchmark/convert_ilcd_tidas.sh'
+      - '.github/workflows/lci-benchmark-convert-tidas.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'lci_benchmark/convert_ilcd_tidas.sh'
+      - '.github/workflows/lci-benchmark-convert-tidas.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  convert:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Convert matched ILCD release to TIDAS v0.2.0
+        id: convert
+        continue-on-error: true
+        run: |
+          chmod +x lci_benchmark/convert_ilcd_tidas.sh
+          TIDAS_VERSION=0.2.0 lci_benchmark/convert_ilcd_tidas.sh work
+      - name: Upload conversion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ilcd-to-tidas-diagnostic
+          path: work/tidas_convert_diagnostic
+          if-no-files-found: error
+          retention-days: 30
+      - name: Fail if conversion failed
+        if: steps.convert.outcome != 'success'
+        run: exit 1
