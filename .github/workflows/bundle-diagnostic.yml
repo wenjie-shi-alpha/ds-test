@@ -3,12 +3,18 @@ on:
   push:
     branches: [lci-format-benchmark-20260824]
     paths:
-      - lci_benchmark/research_scripts.tar.gz.b64
+      - lci_benchmark/research_scripts.part00
+      - lci_benchmark/research_scripts.part01
+      - lci_benchmark/research_scripts.part02
+      - lci_benchmark/research_scripts.part03
       - .github/workflows/bundle-diagnostic.yml
   pull_request:
     branches: [main]
     paths:
-      - lci_benchmark/research_scripts.tar.gz.b64
+      - lci_benchmark/research_scripts.part00
+      - lci_benchmark/research_scripts.part01
+      - lci_benchmark/research_scripts.part02
+      - lci_benchmark/research_scripts.part03
       - .github/workflows/bundle-diagnostic.yml
 permissions:
   contents: read
@@ -17,20 +23,26 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect and decode
+      - name: Reassemble, verify, and extract
         shell: bash
         run: |
-          set -u
-          f=lci_benchmark/research_scripts.tar.gz.b64
-          wc -c "$f"
-          sha256sum "$f"
-          echo 'invalid character count:'
-          LC_ALL=C grep -o '[^A-Za-z0-9+/=[:space:]]' "$f" | wc -l || true
-          echo 'invalid characters (hex):'
-          LC_ALL=C grep -o '[^A-Za-z0-9+/=[:space:]]' "$f" | head -20 | od -An -tx1 || true
-          echo 'head:'; head -c 80 "$f"; echo
-          echo 'tail:'; tail -c 80 "$f"; echo
-          tr -d '\r\n\t ' < "$f" | base64 -d -i > decoded.tar.gz
-          sha256sum decoded.tar.gz
-          wc -c decoded.tar.gz
-          tar -tzf decoded.tar.gz | head -20
+          set -euo pipefail
+          mkdir -p work/scripts work/evidence
+          cat lci_benchmark/research_scripts.part0* | tr -d '\r\n\t ' | base64 -d > work/research_scripts.tar.gz
+          echo '2521eb6eb6792e28c6b175f58198647a6a45665aef5c8d317b0370e9aaea6ccc  work/research_scripts.tar.gz' | sha256sum -c -
+          tar -xzf work/research_scripts.tar.gz -C work/scripts
+          python -m py_compile work/scripts/*.py
+          find work/scripts -type f -print0 | sort -z | xargs -0 sha256sum > work/evidence/scripts_sha256.txt
+          python --version > work/evidence/python_version.txt
+          git rev-parse HEAD > work/evidence/experiment_commit.txt
+          find work/scripts -maxdepth 2 -type f -printf '%P\t%s\n' | sort > work/evidence/file_manifest.tsv
+      - name: Upload decoded source for independent audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: audited-research-scripts
+          path: |
+            work/scripts
+            work/evidence
+            work/research_scripts.tar.gz
+          if-no-files-found: error
+          retention-days: 30
