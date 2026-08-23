@@ -1,0 +1,41 @@
+name: LCI v2 bundle integrity gate
+
+on:
+  push:
+    branches: [lci-format-benchmark-20260824]
+    paths:
+      - lci_benchmark/v2_bundle.part00
+      - lci_benchmark/v2_bundle.part01
+      - .github/workflows/lci-v2-bundle-diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reassemble, verify, and compile v2 bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/v2 work/evidence
+          cat lci_benchmark/v2_bundle.part0* | tr -d '\r\n\t ' | base64 -d > work/v2_bundle.tar.gz
+          echo 'f918b46e087452ccf9d0f10ff6e812aa38213d31fbabe7c2b58a32b6ae0bca11  work/v2_bundle.tar.gz' | sha256sum -c -
+          tar -xzf work/v2_bundle.tar.gz -C work/v2
+          python -m py_compile work/v2/*.py
+          find work/v2 -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > work/evidence/v2_files_sha256.txt
+          sha256sum lci_benchmark/v2_bundle.part0* > work/evidence/bundle_parts_sha256.txt
+          git rev-parse HEAD > work/evidence/commit.txt
+          find work/v2 -maxdepth 1 -type f -printf '%f\t%s\n' | sort > work/evidence/manifest.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audited-v2-benchmark-bundle
+          path: |
+            work/v2
+            work/evidence
+            work/v2_bundle.tar.gz
+          if-no-files-found: error
+          retention-days: 30
