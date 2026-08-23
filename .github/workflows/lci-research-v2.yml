@@ -1,0 +1,282 @@
+name: Execute preregistered LCI representation study v2
+
+on:
+  pull_request:
+    branches: [lci-format-benchmark-20260824]
+    paths:
+      - .github/workflows/lci-research-v2.yml
+
+permissions:
+  contents: read
+
+env:
+  RESEARCH_BUNDLE_SHA256: 2521eb6eb6792e28c6b175f58198647a6a45665aef5c8d317b0370e9aaea6ccc
+  V2_BUNDLE_SHA256: f918b46e087452ccf9d0f10ff6e812aa38213d31fbabe7c2b58a32b6ae0bca11
+  PROTOCOL_SHA256: 7caa7d5f85809ce9f7e0c05615d1bcfafca6700cfdc29e5aa93012dc03e4f576
+  LLAMA_TAG: b10516
+
+jobs:
+  prepare-v2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reassemble and verify frozen source bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/scripts work/v2 work/evidence
+          cat lci_benchmark/research_scripts.part0* | tr -d '\r\n\t ' | base64 -d > work/research_scripts.tar.gz
+          echo "$RESEARCH_BUNDLE_SHA256  work/research_scripts.tar.gz" | sha256sum -c -
+          tar -xzf work/research_scripts.tar.gz -C work/scripts
+          cat lci_benchmark/v2_bundle.part0* | tr -d '\r\n\t ' | base64 -d > work/v2_bundle.tar.gz
+          echo "$V2_BUNDLE_SHA256  work/v2_bundle.tar.gz" | sha256sum -c -
+          tar -xzf work/v2_bundle.tar.gz -C work/v2
+          chmod +x work/scripts/*.sh
+          python -m py_compile work/scripts/*.py work/v2/*.py
+          echo "$PROTOCOL_SHA256  work/v2/study_protocol_v2.md" | sha256sum -c -
+
+      - name: Record preparation environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check lxml==6.0.1
+          mkdir -p work/downloads work/evidence
+          python --version > work/evidence/python_version.txt
+          python -m pip freeze > work/evidence/python_packages.txt
+          git rev-parse HEAD > work/evidence/experiment_commit.txt
+          printf 'workflow_run_id=%s\nworkflow_run_number=%s\nworkflow_attempt=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT" > work/evidence/workflow_run.txt
+          sha256sum work/research_scripts.tar.gz work/v2_bundle.tar.gz work/v2/study_protocol_v2.md > work/evidence/frozen_bundle_sha256.txt
+
+      - name: Download matched USLCI source archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_json_ld.zip \
+            https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_json_ld.zip.zip
+          curl --retry 5 --retry-all-errors -L --fail --show-error \
+            -o work/downloads/uslci_fy19_q2_ecospold2.zip \
+            https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_ecospold2.zip.zip
+
+      - name: Convert corresponding ILCD release to TIDAS
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x lci_benchmark/convert_ilcd_tidas.sh
+          TIDAS_VERSION=0.2.0 lci_benchmark/convert_ilcd_tidas.sh work
+          cp -a work/tidas_convert_diagnostic work/evidence/tidas_conversion
+          sha256sum work/downloads/* > work/evidence/source_archive_sha256.txt
+
+      - name: Validate full source packages and record exact counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import json, zipfile
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          root=Path('work')
+          report={'schema_version':'lci-source-validation.v2','archives':{}}
+          specs=[
+            ('openlca_jsonld',root/'downloads/uslci_fy19_q2_json_ld.zip','processes/','.json','json'),
+            ('ecospold2',root/'downloads/uslci_fy19_q2_ecospold2.zip','Activities/','.spold','xml'),
+            ('ilcd',root/'downloads/uslci_fy19_q2_ilcd.zip','ILCD/processes/','.xml','xml'),
+          ]
+          for name,path,prefix,suffix,kind in specs:
+            errors=[]; roots={}; attrs={}; count=0
+            with zipfile.ZipFile(path) as z:
+              members=[n for n in z.namelist() if n.startswith(prefix) and n.endswith(suffix)]
+              for member in members:
+                data=z.read(member); count+=1
+                try:
+                  if kind=='json':
+                    obj=json.loads(data.decode('utf-8-sig'))
+                    if obj.get('@type')!='Process': raise ValueError('not a Process object')
+                  else:
+                    x=ET.fromstring(data); local=x.tag.rsplit('}',1)[-1]
+                    roots[local]=roots.get(local,0)+1
+                    for k,v in x.attrib.items(): attrs[f'{k}={v}']=attrs.get(f'{k}={v}',0)+1
+                except Exception as exc:
+                  errors.append({'member':member,'error':f'{type(exc).__name__}: {exc}'})
+            report['archives'][name]={'path':str(path),'process_members':count,'parser_valid':count-len(errors),'parser_invalid':len(errors),'root_names':roots,'root_attributes':attrs,'errors':errors[:50]}
+            if errors or count!=758: raise SystemExit(f'{name}: expected 758 parser-valid process records, got {count-len(errors)}/{count}')
+          with zipfile.ZipFile(root/'downloads/uslci_fy19_q2_json_ld.zip') as z:
+            report['openlca_meta_info']=z.read('meta.info').decode('utf-8',errors='replace')
+            report['openlca_context']=json.loads(z.read('context.json').decode('utf-8-sig'))
+          (root/'evidence/source_parser_validation.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
+          PY
+          TIDAS=$(find work/tools-convert/extracted -type f -name tidas -perm /111 -print -quit)
+          "$TIDAS" --format json version > work/evidence/tidas_version.json
+          set +e
+          "$TIDAS" validate work/ilcd_source/ILCD --input-format ilcd-xml --format json \
+            --issues work/evidence/ilcd_validation_issues.jsonl --report work/evidence/ilcd_validation_report.json \
+            > work/evidence/ilcd_validation_stdout.json 2> work/evidence/ilcd_validation_stderr.txt
+          ILCD_STATUS=$?
+          "$TIDAS" validate work/tidas_from_ilcd/data --input-format tidas-json --format json \
+            --issues work/evidence/tidas_validation_issues.jsonl --report work/evidence/tidas_validation_report.json \
+            > work/evidence/tidas_validation_stdout.json 2> work/evidence/tidas_validation_stderr.txt
+          TIDAS_STATUS=$?
+          set -e
+          printf 'ilcd_exit_status=%s\ntidas_exit_status=%s\n' "$ILCD_STATUS" "$TIDAS_STATUS" > work/evidence/validator_exit_status.txt
+
+      - name: Build exact-UUID sample and corrected v2 experiments
+        shell: bash
+        run: |
+          set -euo pipefail
+          python lci_benchmark/build_matched_sample.py \
+            --jsonld work/downloads/uslci_fy19_q2_json_ld.zip \
+            --ecospold2 work/downloads/uslci_fy19_q2_ecospold2.zip \
+            --ilcd work/downloads/uslci_fy19_q2_ilcd.zip \
+            --tidas-dir work/tidas_from_ilcd/data \
+            --output work/matched_sample --n 30
+          mkdir -p work/prepared_v1 work/prepared_v2
+          python work/scripts/prepare_benchmark.py --sample work/matched_sample --output work/prepared_v1/format_benchmark
+          python work/scripts/prepare_ablation.py --benchmark work/prepared_v1/format_benchmark --output work/prepared_v1/ablation_benchmark
+          python work/v2/build_benchmark_v2.py work/prepared_v1 work/prepared_v2
+          cp -a work/evidence work/prepared_v2/evidence
+          cp work/v2/study_protocol_v2.md work/prepared_v2/evidence/STUDY_PROTOCOL_V2.md
+          cp work/matched_sample/manifest.csv work/prepared_v2/evidence/matched_sample_manifest.csv
+          cp work/matched_sample/manifest.json work/prepared_v2/evidence/matched_sample_manifest.json
+          cp work/matched_sample/all_files_sha256.txt work/prepared_v2/evidence/matched_sample_sha256.txt
+          find work/prepared_v2 -type f -print0 | sort -z | xargs -0 sha256sum > work/prepared_v2/evidence/prepared_v2_files_sha256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prepared-study-v2
+          path: work/prepared_v2
+          if-no-files-found: error
+          retention-days: 30
+
+  infer-v2:
+    needs: prepare-v2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 390
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        include:
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 11, shard: 0}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 11, shard: 1}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 22, shard: 0}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 22, shard: 1}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 33, shard: 0}
+          - {repo: Qwen/Qwen3-4B-GGUF, alias: qwen3-4b, seed: 33, shard: 1}
+          - {repo: Qwen/Qwen2.5-1.5B-Instruct-GGUF, alias: qwen25-15b, seed: 11, shard: 0}
+          - {repo: Qwen/Qwen2.5-1.5B-Instruct-GGUF, alias: qwen25-15b, seed: 11, shard: 1}
+          - {repo: bartowski/Llama-3.2-3B-Instruct-GGUF, alias: llama32-3b, seed: 11, shard: 0}
+          - {repo: bartowski/Llama-3.2-3B-Instruct-GGUF, alias: llama32-3b, seed: 11, shard: 1}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prepared-study-v2
+          path: work/prepared_v2
+
+      - name: Reassemble frozen runtime and v2 scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/scripts work/v2
+          cat lci_benchmark/research_scripts.part0* | tr -d '\r\n\t ' | base64 -d > work/research_scripts.tar.gz
+          echo "$RESEARCH_BUNDLE_SHA256  work/research_scripts.tar.gz" | sha256sum -c -
+          tar -xzf work/research_scripts.tar.gz -C work/scripts
+          cat lci_benchmark/v2_bundle.part0* | tr -d '\r\n\t ' | base64 -d > work/v2_bundle.tar.gz
+          echo "$V2_BUNDLE_SHA256  work/v2_bundle.tar.gz" | sha256sum -c -
+          tar -xzf work/v2_bundle.tar.gz -C work/v2
+          chmod +x work/scripts/*.sh
+          LLAMA_TAG="$LLAMA_TAG" work/scripts/setup_runtime.sh '${{ matrix.repo }}' Q4_K_M work/runtime
+
+      - name: Start pinned local llama.cpp server
+        shell: bash
+        run: |
+          set -euo pipefail
+          SERVER=$(cat work/runtime/metadata/llama_server_path.txt)
+          MODEL=$(cat work/runtime/metadata/model_path.txt)
+          nohup "$SERVER" --model "$MODEL" --alias '${{ matrix.alias }}' --host 127.0.0.1 --port 8080 \
+            --ctx-size 32768 --threads 4 --parallel 1 --jinja > work/runtime/server.log 2>&1 &
+          echo $! > work/runtime/server.pid
+          for i in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8080/health > work/runtime/health.json; then exit 0; fi
+            sleep 2
+          done
+          cat work/runtime/server.log
+          exit 1
+
+      - name: Run controlled v2 extraction prompts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/outputs
+          REV=$(cat work/runtime/metadata/model_revision.txt)
+          FILE=$(cat work/runtime/metadata/model_file.txt)
+          MSHA=$(cut -d' ' -f1 work/runtime/metadata/model_sha256.txt)
+          LSHA=$(cut -d' ' -f1 work/runtime/metadata/llama_asset_sha256.txt)
+          LVER=$(tr '\n' ' ' < work/runtime/metadata/llama_version.txt | head -c 1000)
+          OUT='work/outputs/${{ matrix.alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard }}of2.jsonl'
+          python work/v2/run_inference_v2.py --prepared-root work/prepared_v2 --output "$OUT" \
+            --model-alias '${{ matrix.alias }}' --model-id '${{ matrix.repo }}' \
+            --model-revision "$REV" --model-file "$FILE" --model-sha256 "$MSHA" \
+            --llama-version "$LVER" --llama-asset-sha256 "$LSHA" --seed '${{ matrix.seed }}' \
+            --temperature 0.2 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 1.5 \
+            --max-tokens 512 --reasoning-mode non-thinking --shard-index '${{ matrix.shard }}' \
+            --shard-count 2 --timeout 600 --retries 3
+          cp -a work/runtime/metadata 'work/outputs/${{ matrix.alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard }}of2.runtime_metadata'
+          cp work/runtime/server.log 'work/outputs/${{ matrix.alias }}__seed${{ matrix.seed }}__shard${{ matrix.shard }}of2.server.log'
+          sha256sum work/outputs/*.jsonl work/outputs/*.metadata.json > work/outputs/output_sha256.txt
+
+      - name: Stop server
+        if: always()
+        run: if [[ -f work/runtime/server.pid ]]; then kill "$(cat work/runtime/server.pid)" || true; fi
+
+      - name: Upload raw v2 inference evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v2-output-${{ matrix.alias }}-seed${{ matrix.seed }}-shard${{ matrix.shard }}of2
+          path: work/outputs
+          if-no-files-found: error
+          retention-days: 30
+
+  score-v2:
+    if: always() && needs.prepare-v2.result == 'success'
+    needs: [prepare-v2, infer-v2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: prepared-study-v2
+          path: work/prepared_v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v2-output-*
+          path: work/inference
+          merge-multiple: true
+
+      - name: Score all completed v2 outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/v2 work/scored_v2
+          cat lci_benchmark/v2_bundle.part0* | tr -d '\r\n\t ' | base64 -d > work/v2_bundle.tar.gz
+          echo "$V2_BUNDLE_SHA256  work/v2_bundle.tar.gz" | sha256sum -c -
+          tar -xzf work/v2_bundle.tar.gz -C work/v2
+          mapfile -t OUTPUTS < <(find work/inference -type f -name '*.jsonl' | sort)
+          [[ ${#OUTPUTS[@]} -gt 0 ]]
+          python work/v2/score_outputs_v2.py --prepared-root work/prepared_v2 --outputs "${OUTPUTS[@]}" --outdir work/scored_v2
+          cp work/prepared_v2/format_benchmark_v2/benchmark_metadata.json work/scored_v2/format_benchmark_metadata.json
+          cp work/prepared_v2/ablation_benchmark_v2/ablation_metadata.json work/scored_v2/ablation_benchmark_metadata.json
+          cp -a work/prepared_v2/evidence work/scored_v2/preparation_evidence
+          find work/scored_v2 -type f -print0 | sort -z | xargs -0 sha256sum > work/scored_v2/scored_v2_files_sha256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scored-study-v2
+          path: work/scored_v2
+          if-no-files-found: error
+          retention-days: 30
