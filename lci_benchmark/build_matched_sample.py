@@ -207,6 +207,15 @@ def main() -> int:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, destination)
 
+    checksum_lines = []
+    for path in sorted(p for p in args.output.rglob("*") if p.is_file()):
+        if path.name == "all_files_sha256.txt":
+            continue
+        checksum_lines.append(f"{file_sha256(path)}  {path.relative_to(args.output).as_posix()}")
+    (args.output / "all_files_sha256.txt").write_text(
+        "\n".join(checksum_lines) + "\n", encoding="utf-8"
+    )
+
     print(json.dumps(metadata, indent=2))
     return 0
 
