@@ -10,11 +10,16 @@ REPORT="$ROOT/tidas_diagnostic"
 mkdir -p "$DOWNLOADS" "$TOOLS" "$OUT" "$REPORT"
 
 JSONLD="$DOWNLOADS/uslci_fy19_q2_json_ld.zip"
+PATCHED_JSONLD="$DOWNLOADS/uslci_fy19_q2_json_ld_tidas_compat.zip"
 if [[ ! -s "$JSONLD" ]]; then
   curl --retry 5 --retry-all-errors -L --fail --show-error \
     -o "$JSONLD" \
     'https://raw.githubusercontent.com/FLCAC-admin/uslci-content/dev/downloads/uslci_fy19_q2_01_olca1_8_0_json_ld.zip.zip'
 fi
+
+python lci_benchmark/patch_openlca_for_tidas.py \
+  "$JSONLD" "$PATCHED_JSONLD" "$REPORT/tidas_compatibility_manifest.json"
+sha256sum "$JSONLD" "$PATCHED_JSONLD" > "$REPORT/jsonld_sha256.txt"
 
 release_json="$REPORT/tidas_release_v${VERSION}.json"
 curl --retry 5 --retry-all-errors -L --fail --show-error \
@@ -36,14 +41,11 @@ PY
 asset_url=$(python - "$release_json" <<'PY'
 import json, re, sys
 assets=json.load(open(sys.argv[1], encoding='utf-8')).get('assets', [])
-patterns=[
-    r'linux.*x86[_-]?64',
-    r'x86[_-]?64.*linux',
-    r'x86_64-unknown-linux-gnu',
-]
+patterns=[r'x86_64-unknown-linux-gnu', r'linux.*x86[_-]?64', r'x86[_-]?64.*linux']
 for pat in patterns:
     for a in assets:
-        if re.search(pat, a.get('name',''), re.I) and not a.get('name','').endswith(('.sha256','.spdx.json','.intoto.jsonl')):
+        name=a.get('name','')
+        if re.search(pat, name, re.I) and not name.endswith(('.sha256','.spdx.json','.intoto.jsonl')):
             print(a['browser_download_url'])
             raise SystemExit
 raise SystemExit('No Linux x86_64 release asset found')
@@ -62,9 +64,7 @@ case "$archive" in
 esac
 
 TIDAS=$(find "$TOOLS/extracted" -type f -name tidas -perm /111 -print -quit || true)
-if [[ -z "$TIDAS" ]]; then
-  TIDAS=$(find "$TOOLS/extracted" -type f -name tidas -print -quit || true)
-fi
+if [[ -z "$TIDAS" ]]; then TIDAS=$(find "$TOOLS/extracted" -type f -name tidas -print -quit || true); fi
 if [[ -z "$TIDAS" ]]; then
   find "$TOOLS/extracted" -maxdepth 4 -type f -printf '%p\n' > "$REPORT/extracted_files.txt"
   echo "Unable to locate tidas executable" >&2
@@ -74,11 +74,14 @@ chmod +x "$TIDAS"
 printf '%s\n' "$TIDAS" > "$REPORT/tidas_binary_path.txt"
 "$TIDAS" --format json version > "$REPORT/tidas_version.json" 2> "$REPORT/tidas_version.stderr"
 "$TIDAS" --help > "$REPORT/tidas_help.txt" 2>&1
+"$TIDAS" import --help > "$REPORT/tidas_import_help.txt" 2>&1
+"$TIDAS" validate --help > "$REPORT/tidas_validate_help.txt" 2>&1
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
 set +e
-"$TIDAS" import "$JSONLD" \
+"$TIDAS" import "$PATCHED_JSONLD" \
+  --from-format openlca-jsonld \
   --output "$OUT" \
   --target tidas \
   --write-mapping \
@@ -109,8 +112,24 @@ out.write_text(json.dumps(summary, indent=2), encoding='utf-8')
 samples.mkdir(parents=True, exist_ok=True)
 json_files=[p for p in files if p.suffix.lower()=='.json']
 process_like=[p for p in json_files if 'process' in str(p).lower()]
-for p in (process_like or json_files)[:5]:
+for p in (process_like or json_files)[:10]:
     shutil.copy2(p, samples / p.name)
 PY
+
+if [[ "$status" -eq 0 ]]; then
+  TIDAS_DIR="$OUT/tidas"
+  if [[ -d "$TIDAS_DIR" ]]; then
+    set +e
+    "$TIDAS" validate "$TIDAS_DIR" \
+      --input-format tidas-json \
+      --format json \
+      --report "$REPORT/tidas_validation_report.json" \
+      > "$REPORT/tidas_validation_stdout.json" \
+      2> "$REPORT/tidas_validation_stderr.txt"
+    validation_status=$?
+    set -e
+    printf '%s\n' "$validation_status" > "$REPORT/tidas_validation_exit_status.txt"
+  fi
+fi
 
 exit "$status"
